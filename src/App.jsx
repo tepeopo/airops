@@ -1,4 +1,13 @@
 import { useState, useEffect, useRef } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+/* ════════════════════════════════════════
+   SUPABASE CLIENT
+════════════════════════════════════════ */
+const supabase = createClient(
+  "https://ahdcmxvsznnpmqmxxudo.supabase.co",
+  "sb_publishable_RlYExWFK8KNB-CEKOozqeQ_Vdse1R0E"
+);
 
 /* ════════════════════════════════════════
    THEME
@@ -32,18 +41,8 @@ const C = {
 const FONT = "'IBM Plex Mono', monospace";
 
 /* ════════════════════════════════════════
-   STORAGE  (shared=true → everyone shares)
+   CONSTANTS
 ════════════════════════════════════════ */
-const SK = {
-  airports: "v3:airports",
-  aircraft: "v3:aircraft",
-  acConfig:  "v3:acConfig",
-  routes:    "v3:routes",
-  boards:    "v3:boards",
-  charters:  "v3:charters",
-  weekly:    "v3:weekly",
-};
-
 const DAYS = ["mon","tue","wed","thu","fri","sat","sun"];
 const DAY_LABELS = { mon:"Monday", tue:"Tuesday", wed:"Wednesday", thu:"Thursday", fri:"Friday", sat:"Saturday", sun:"Sunday" };
 
@@ -52,12 +51,108 @@ function dateToDay(dateStr) {
   return DAYS[d.getDay() === 0 ? 6 : d.getDay() - 1];
 }
 
-async function sGet(key, fb) {
-  try { const r = await window.storage.get(key, true); return r ? JSON.parse(r.value) : fb; }
-  catch { return fb; }
+/* ════════════════════════════════════════
+   SUPABASE DATA HELPERS
+   Each function maps to one Supabase table.
+   All errors are caught and logged silently
+   so the UI never hard-crashes on a DB error.
+════════════════════════════════════════ */
+
+// ── Generic single-row key/value tables (airports, aircraft, routes, charters)
+async function dbGetAll(table) {
+  try {
+    const { data, error } = await supabase.from(table).select("*");
+    if (error) throw error;
+    return data || [];
+  } catch (e) { console.error("dbGetAll", table, e); return []; }
 }
-async function sSet(key, val) {
-  try { await window.storage.set(key, JSON.stringify(val), true); } catch {}
+
+async function dbUpsert(table, row) {
+  try {
+    const { error } = await supabase.from(table).upsert(row);
+    if (error) throw error;
+  } catch (e) { console.error("dbUpsert", table, e); }
+}
+
+async function dbDelete(table, id) {
+  try {
+    const { error } = await supabase.from(table).delete().eq("id", id);
+    if (error) throw error;
+  } catch (e) { console.error("dbDelete", table, e); }
+}
+
+// ── ac_config: one row per aircraft id
+async function dbGetAcConfig() {
+  try {
+    const { data, error } = await supabase.from("ac_config").select("*");
+    if (error) throw error;
+    const map = {};
+    (data||[]).forEach(r => { map[r.ac_id] = { routeFlightTimes: r.route_flight_times||{}, defaultCapacity: r.default_capacity }; });
+    return map;
+  } catch (e) { console.error("dbGetAcConfig", e); return {}; }
+}
+
+async function dbSaveAcConfig(acId, cfg) {
+  try {
+    const { error } = await supabase.from("ac_config").upsert({
+      ac_id: acId,
+      route_flight_times: cfg.routeFlightTimes || {},
+      default_capacity: cfg.defaultCapacity || null,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+  } catch (e) { console.error("dbSaveAcConfig", e); }
+}
+
+// ── boards: one row per date
+async function dbGetBoards() {
+  try {
+    const { data, error } = await supabase.from("boards").select("*");
+    if (error) throw error;
+    const map = {};
+    (data||[]).forEach(r => { map[r.date] = { pool: r.pool||{}, assignments: r.assignments||[] }; });
+    return map;
+  } catch (e) { console.error("dbGetBoards", e); return {}; }
+}
+
+async function dbSaveBoard(date, board) {
+  try {
+    const { error } = await supabase.from("boards").upsert({
+      date,
+      pool: board.pool || {},
+      assignments: board.assignments || [],
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+    // Always write to history_log for AI training data
+    await supabase.from("history_log").insert({
+      date,
+      pool: board.pool || {},
+      assignments: board.assignments || [],
+    });
+  } catch (e) { console.error("dbSaveBoard", e); }
+}
+
+// ── weekly: one row per day key
+async function dbGetWeekly() {
+  try {
+    const { data, error } = await supabase.from("weekly").select("*");
+    if (error) throw error;
+    const map = {};
+    (data||[]).forEach(r => { map[r.day] = r.slots||[]; });
+    return map;
+  } catch (e) { console.error("dbGetWeekly", e); return {}; }
+}
+
+async function dbSaveWeeklyDay(day, slots) {
+  try {
+    const { error } = await supabase.from("weekly").upsert({
+      day,
+      slots,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+  } catch (e) { console.error("dbSaveWeeklyDay", e); }
 }
 
 /* ════════════════════════════════════════
@@ -562,7 +657,7 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
   const saveBoard = async (updated) => {
     const newBoards = { ...boards, [date]: updated };
     setBoards(newBoards);
-    await sSet(SK.boards, newBoards);
+    await dbSaveBoard(date, updated);
   };
 
   const setPool = async (routeId, val) => {
@@ -891,12 +986,14 @@ function SetupAirports({ airports, setAirports }) {
   const [form, setForm] = useState({ code:"", name:"", country:"" });
   const save = async () => {
     if (!form.code) return;
-    const e = { ...form, id:uid(), code:form.code.toUpperCase() };
-    const u = [...airports, e]; setAirports(u); await sSet(SK.airports, u);
+    const e = { ...form, id: uid(), code: form.code.toUpperCase() };
+    await dbUpsert("airports", e);
+    setAirports([...airports, e]);
     setForm({ code:"", name:"", country:"" });
   };
   const del = async (id) => {
-    const u = airports.filter(a=>a.id!==id); setAirports(u); await sSet(SK.airports, u);
+    await dbDelete("airports", id);
+    setAirports(airports.filter(a=>a.id!==id));
   };
   return (
     <div>
@@ -954,17 +1051,21 @@ function SetupFleet({ aircraft, setAircraft, airports, routes, acConfig, setAcCo
     if (!form.reg||!form.defaultCapacity) return;
     const e = { ...form, id:editId||uid(), defaultCapacity:Number(form.defaultCapacity) };
     const u = editId ? aircraft.map(a=>a.id===editId?e:a) : [...aircraft,e];
-    setAircraft(u); await sSet(SK.aircraft, u);
+    setAircraft(u);
+    await dbUpsert("aircraft", { id:e.id, reg:e.reg, type:e.type||"", default_capacity:e.defaultCapacity, base:e.base||"", status:e.status });
     // Save route flight times into acConfig
     const acId = e.id;
-    const updCfg = { ...acConfig, [acId]: { ...(acConfig[acId]||{}), routeFlightTimes: routeTimes } };
-    setAcConfig(updCfg); await sSet(SK.acConfig, updCfg);
+    const newCfg = { ...(acConfig[acId]||{}), routeFlightTimes: routeTimes };
+    const updCfg = { ...acConfig, [acId]: newCfg };
+    setAcConfig(updCfg);
+    await dbSaveAcConfig(acId, newCfg);
     setShow(false); setEditId(null); setForm({ reg:"", type:"", defaultCapacity:"", base:"", status:"active" });
   };
 
   const del = async (id) => {
     if (!confirm("Remove?")) return;
-    const u = aircraft.filter(a=>a.id!==id); setAircraft(u); await sSet(SK.aircraft, u);
+    await dbDelete("aircraft", id);
+    setAircraft(aircraft.filter(a=>a.id!==id));
   };
 
   const statusCol = { active:C.green, maintenance:C.amber, aog:C.red };
@@ -1093,12 +1194,15 @@ function SetupRoutes({ routes, setRoutes, airports }) {
     if (!form.name||legs.length===0) return alert("Name and at least one leg required");
     const e = {...form,id:editId||uid(),operationalRouting:legs,marketedSectors:marketed};
     const u = editId ? routes.map(r=>r.id===editId?e:r) : [...routes,e];
-    setRoutes(u); await sSet(SK.routes,u); setShow(false);
+    setRoutes(u);
+    await dbUpsert("routes", { id:e.id, name:e.name, operational_routing:e.operationalRouting, marketed_sectors:e.marketedSectors, notes:e.notes||"" });
+    setShow(false);
   };
 
   const del = async (id) => {
     if (!confirm("Delete route?")) return;
-    const u = routes.filter(r=>r.id!==id); setRoutes(u); await sSet(SK.routes,u);
+    await dbDelete("routes", id);
+    setRoutes(routes.filter(r=>r.id!==id));
   };
 
   return (
@@ -1214,14 +1318,16 @@ function SetupCharters({ charters, setCharters, aircraft, airports }) {
     if (!form.client||!form.date) return;
     const e = {...form,id:editId||uid(),pax:Number(form.pax)||0};
     const u = editId ? charters.map(c=>c.id===editId?e:c) : [...charters,e];
-    setCharters(u); await sSet(SK.charters,u);
+    setCharters(u);
+    await dbUpsert("charters", { id:e.id, client:e.client, from_airport:e.from||"", to_airport:e.to||"", date:e.date, dep_time:e.depTime||"", arr_time:e.arrTime||"", pax:e.pax, ac_id:e.acId||null, status:e.status, notes:e.notes||"" });
     setShow(false); setEditId(null);
     setForm({client:"",from:"",to:"",date:todayStr(),depTime:"",arrTime:"",pax:"",acId:"",status:"pending",notes:""});
   };
 
   const del = async (id) => {
     if (!confirm("Delete?")) return;
-    const u = charters.filter(c=>c.id!==id); setCharters(u); await sSet(SK.charters,u);
+    await dbDelete("charters", id);
+    setCharters(charters.filter(c=>c.id!==id));
   };
 
   const td = todayStr();
@@ -1336,7 +1442,7 @@ function WeeklySchedule({ weekly, setWeekly, routes, aircraft }) {
     updated.sort((a,b) => a.depTime.localeCompare(b.depTime));
     const newWeekly = { ...weekly, [activeDay]: updated };
     setWeekly(newWeekly);
-    await sSet(SK.weekly, newWeekly);
+    await dbSaveWeeklyDay(activeDay, updated);
     setShowForm(false); setEditIdx(null); setForm(emptyForm);
   };
 
@@ -1344,7 +1450,7 @@ function WeeklySchedule({ weekly, setWeekly, routes, aircraft }) {
     const updated = daySlots.filter((_,i) => i !== idx);
     const newWeekly = { ...weekly, [activeDay]: updated };
     setWeekly(newWeekly);
-    await sSet(SK.weekly, newWeekly);
+    await dbSaveWeeklyDay(activeDay, updated);
   };
 
   const openEdit = (slot, idx) => {
@@ -1356,7 +1462,7 @@ function WeeklySchedule({ weekly, setWeekly, routes, aircraft }) {
     if (!confirm(`Copy ${DAY_LABELS[activeDay]} template to ${DAY_LABELS[targetDay]}?`)) return;
     const newWeekly = { ...weekly, [targetDay]: JSON.parse(JSON.stringify(daySlots)) };
     setWeekly(newWeekly);
-    await sSet(SK.weekly, newWeekly);
+    await dbSaveWeeklyDay(targetDay, JSON.parse(JSON.stringify(daySlots)));
   };
 
   const totalSlots = DAYS.reduce((s,d) => s + (weekly[d]||[]).length, 0);
@@ -1547,19 +1653,46 @@ export default function App() {
   const [ready, setReady]         = useState(false);
 
   useEffect(() => {
-    Promise.all([
-      sGet(SK.airports, []),
-      sGet(SK.aircraft, []),
-      sGet(SK.acConfig, {}),
-      sGet(SK.routes, []),
-      sGet(SK.boards, {}),
-      sGet(SK.charters, []),
-      sGet(SK.weekly, {}),
-    ]).then(([ap,ac,cfg,ro,bo,ch,wk]) => {
-      setAirports(ap); setAircraft(ac); setAcConfig(cfg);
-      setRoutes(ro); setBoards(bo); setCharters(ch); setWeekly(wk);
-      setReady(true);
-    });
+    async function loadAll() {
+      try {
+        const [ap, ac, cfg, ro, bo, ch, wk] = await Promise.all([
+          dbGetAll("airports"),
+          dbGetAll("aircraft"),
+          dbGetAcConfig(),
+          dbGetAll("routes"),
+          dbGetBoards(),
+          dbGetAll("charters"),
+          dbGetWeekly(),
+        ]);
+        // Normalize aircraft from DB column names
+        setAirports(ap);
+        setAircraft(ac.map(a => ({
+          id: a.id, reg: a.reg, type: a.type||"",
+          defaultCapacity: a.default_capacity||0,
+          base: a.base||"", status: a.status||"active"
+        })));
+        setAcConfig(cfg);
+        setRoutes(ro.map(r => ({
+          id: r.id, name: r.name,
+          operationalRouting: r.operational_routing||[],
+          marketedSectors: r.marketed_sectors||[],
+          notes: r.notes||""
+        })));
+        setBoards(bo);
+        setCharters(ch.map(c => ({
+          id: c.id, client: c.client, from: c.from_airport||"",
+          to: c.to_airport||"", date: c.date, depTime: c.dep_time||"",
+          arrTime: c.arr_time||"", pax: c.pax||0,
+          acId: c.ac_id||"", status: c.status||"pending", notes: c.notes||""
+        })));
+        setWeekly(wk);
+      } catch(e) {
+        console.error("Load error:", e);
+      } finally {
+        setReady(true);
+      }
+    }
+    loadAll();
   }, []);
 
   const TABS = [
@@ -1608,7 +1741,7 @@ export default function App() {
         <div style={{ fontSize:9, color:C.faint, display:"flex", gap:12 }}>
           <span>{aircraft.filter(a=>a.status==="active").length} active AC</span>
           <span>{routes.length} routes</span>
-          <span style={{ color:C.green }}>● SHARED</span>
+          <span style={{ color:C.green }}>● LIVE DB</span>
         </div>
       </header>
 
