@@ -352,16 +352,25 @@ function AircraftCard({
 
   // Consumed per route by ALL aircraft
   const consumed = {};
+  const consumedByLeg = {};
   allAssignments.forEach(a => {
     (a.legs||[]).forEach(leg => {
-      if (leg.type==="route" && leg.routeId)
-        consumed[leg.routeId] = (consumed[leg.routeId]||0) + legPaxFromPool(leg);
+      if (leg.type==="route" && leg.routeId) {
+        const pax = legPaxFromPool(leg);
+        const legIdx = leg.routeLegIndex ?? 0;
+        const legKey = leg.routeId + ":" + legIdx;
+        consumedByLeg[legKey] = (consumedByLeg[legKey]||0) + pax;
+      }
       const cnx = Number(leg.connectingPax)||0;
       const cnxRoute = leg.throughPaxRouteId;
       if (cnx > 0 && cnxRoute) {
         consumed[cnxRoute] = (consumed[cnxRoute]||0) + cnx;
       }
     });
+  });
+  Object.keys(consumedByLeg).forEach(key => {
+    const routeId = key.split(":")[0];
+    consumed[routeId] = Math.max(consumed[routeId]||0, consumedByLeg[key]);
   });
 
   const getRemaining = (routeId) => Math.max(0, (pool[routeId]||0) - (consumed[routeId]||0));
@@ -498,7 +507,7 @@ function AircraftCard({
 /* ════════════════════════════════════════
    LEG EDITOR MODAL
 ════════════════════════════════════════ */
-function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, acConfig, allLegs }) {
+function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, consumedByLeg, ac, acConfig, allLegs }) {
   const cfg = acConfig[ac?.id] || {};
   const cap = cfg.defaultCapacity || ac?.defaultCapacity || 0;
 
@@ -506,25 +515,37 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
   const guessFrom = allLegs.length > 0 ? allLegs[allLegs.length-1].arr : (ac?.base || "");
 
   const [form, setForm] = useState(leg || {
-    type: "route", routeId: "", dep: guessFrom, arr: "",
+    type: "route", routeId: "", routeLegIndex: 0, dep: guessFrom, arr: "",
     pax: "", connectingPax: "", throughPaxRouteId: "", depTime: "", arrTime: "",
     charterClient: "", charterRef: "",
   });
 
   const selRoute = routes.find(r => r.id === form.routeId);
 
-  // Auto-fill arr from route
+  // Auto-fill dep/arr from route when routeId changes
   useEffect(() => {
     if (form.type === "route" && form.routeId && selRoute) {
-      const legs = selRoute.operationalRouting || [];
-      if (legs.length > 0) {
-        // find leg matching dep
-        const match = legs.find(l => l.from === form.dep);
-        if (match) setForm(f => ({ ...f, arr: match.to }));
-        else setForm(f => ({ ...f, dep: legs[0].from, arr: legs[legs.length-1].to }));
+      const routeLegs = selRoute.operationalRouting || [];
+      if (routeLegs.length > 0) {
+        // If current dep matches a leg, keep it; otherwise default to first leg
+        const match = routeLegs.find(l => l.from === form.dep);
+        if (!match) {
+          setForm(f => ({ ...f, dep: routeLegs[0].from, arr: routeLegs[0].to }));
+        } else {
+          setForm(f => ({ ...f, arr: match.to }));
+        }
       }
     }
-  }, [form.routeId, form.dep]);
+  }, [form.routeId]);
+
+  // When dep changes, update arr to match the corresponding leg
+  useEffect(() => {
+    if (form.type === "route" && selRoute) {
+      const routeLegs = selRoute.operationalRouting || [];
+      const match = routeLegs.find(l => l.from === form.dep);
+      if (match) setForm(f => ({ ...f, arr: match.to }));
+    }
+  }, [form.dep]);
 
   // Auto-calc arrTime from depTime + aircraft-specific flight time for this route
   useEffect(() => {
@@ -536,17 +557,31 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
     }
   }, [form.depTime, form.routeId]);
 
-  // Remaining pax for selected route
+  // Remaining pax for this specific physical leg
+  const legKey = form.routeId ? form.routeId + ":" + (form.routeLegIndex ?? 0) : null;
+  const legAssigned = legKey ? (consumedByLeg?.[legKey] || 0) : 0;
   const remaining = form.routeId
-    ? Math.max(0, (pool[form.routeId]||0) - (consumed[form.routeId]||0))
+    ? Math.max(0, (pool[form.routeId]||0) - legAssigned)
     : 0;
 
-  // Auto suggest pax = min(cap, remaining)
+  // Auto suggest pax:
+  // - For first leg: use total pool
+  // - For subsequent legs: use what was assigned on the previous leg (continuing pax)
   useEffect(() => {
     if (form.type === "route" && form.routeId && !leg) {
-      setForm(f => ({ ...f, pax: String(Math.min(cap, remaining)) }));
+      const total = pool[form.routeId] || 0;
+      const legIdx = form.routeLegIndex ?? 0;
+      if (legIdx > 0) {
+        // Use pax from the previous leg as default (same pax continuing)
+        const prevLegKey = form.routeId + ":" + (legIdx - 1);
+        const prevLegPax = consumedByLeg?.[prevLegKey] || 0;
+        const suggested = prevLegPax > 0 ? prevLegPax : total;
+        setForm(f => ({ ...f, pax: String(Math.min(cap, suggested)) }));
+      } else {
+        setForm(f => ({ ...f, pax: String(Math.min(cap, total)) }));
+      }
     }
-  }, [form.routeId]);
+  }, [form.routeId, form.routeLegIndex]);
 
   const valid =
     form.type === "route"   ? (form.routeId && form.dep && form.arr && form.depTime && form.arrTime && form.pax) :
@@ -572,6 +607,17 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
             <select style={s.inp} value={form.routeId} onChange={e => setForm(f=>({...f,routeId:e.target.value,pax:""}))}>
               <option value="">Select route…</option>
               {routes.map(r => {
+                const routeLegs = r.operationalRouting || [];
+                const isMulti = routeLegs.length > 1;
+                if (isMulti) {
+                  // Show per-leg coverage status
+                  const total = pool[r.id] || 0;
+                  const legStatus = routeLegs.map((l, i) => {
+                    const assigned = consumedByLeg?.[r.id+":"+i] || 0;
+                    return `${l.from}-${l.to}: ${assigned}/${total}`;
+                  }).join(", ");
+                  return <option key={r.id} value={r.id}>{r.name} — [{legStatus}]</option>;
+                }
                 const rem = Math.max(0,(pool[r.id]||0)-(consumed[r.id]||0));
                 return <option key={r.id} value={r.id}>{r.name} — {rem} pax remaining</option>;
               })}
@@ -591,14 +637,55 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
               })()}
             </div>
           )}
-          <G2>
-            <F label="From">
-              <input style={s.inp} value={form.dep} onChange={e => setForm(f=>({...f,dep:e.target.value.toUpperCase()}))} placeholder="FBM" />
+          {/* Segment selector for multi-leg routes */}
+          {selRoute && (selRoute.operationalRouting||[]).length > 1 ? (
+            <F label="Segment *">
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                {(selRoute.operationalRouting||[]).map((l, i) => {
+                  const active = form.dep === l.from && form.arr === l.to;
+                  return (
+                    <button key={i} type="button"
+                      onClick={() => {
+                        // Auto-fill pax from previous leg when picking a non-first segment
+                        let autoPax = form.pax;
+                        if (i > 0) {
+                          const prevKey = form.routeId + ":" + (i - 1);
+                          const prevPax = consumedByLeg?.[prevKey] || 0;
+                          if (prevPax > 0) autoPax = String(prevPax);
+                        }
+                        setForm(f => ({ ...f, dep: l.from, arr: l.to, routeLegIndex: i, pax: autoPax }));
+                      }}
+                      style={{ ...s.btn(active ? "primary" : "ghost"), fontSize:11, padding:"6px 14px" }}>
+                      {l.from}→{l.to}
+                      {i > 0 && consumedByLeg?.[form.routeId+":"+i] > 0 && (
+                        <span style={{ marginLeft:4, fontSize:9, color:C.green }}>✓</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize:9, color:C.faint, marginTop:5 }}>
+                {(selRoute.operationalRouting||[]).map((l, i) => {
+                  const count = consumedByLeg?.[form.routeId+":"+i] || 0;
+                  if (count === 0) return null;
+                  return (
+                    <span key={i} style={{ marginRight:10, color:C.dim }}>
+                      {l.from}→{l.to}: <span style={{ color:C.cyan }}>{count} pax assigned</span>
+                    </span>
+                  );
+                })}
+              </div>
             </F>
-            <F label="To">
-              <input style={s.inp} value={form.arr} onChange={e => setForm(f=>({...f,arr:e.target.value.toUpperCase()}))} placeholder="KWZ" />
-            </F>
-          </G2>
+          ) : (
+            <G2>
+              <F label="From">
+                <input style={s.inp} value={form.dep} onChange={e => setForm(f=>({...f,dep:e.target.value.toUpperCase()}))} placeholder="FBM" />
+              </F>
+              <F label="To">
+                <input style={s.inp} value={form.arr} onChange={e => setForm(f=>({...f,arr:e.target.value.toUpperCase()}))} placeholder="KWZ" />
+              </F>
+            </G2>
+          )}
           <F label={`Pax (${remaining} remaining on route, ${cap} seats)`}>
             <input style={{ ...s.inp, borderColor: Number(form.pax)>cap ? C.red : Number(form.pax)>remaining ? C.amber : C.border }}
               type="number" min="0" max={cap} value={form.pax}
@@ -769,7 +856,6 @@ function ExportModal({ onClose, exportSession, setExportSession, generatePrintHT
           const legs = asgn.legs || [];
           const acCharters = charters.filter(c =>
             c.acId === ac.id && c.date === date && c.status !== "cancelled");
-          if (legs.length === 0 && acCharters.length === 0) return null;
 
           const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
           const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
@@ -777,11 +863,16 @@ function ExportModal({ onClose, exportSession, setExportSession, generatePrintHT
           const cfg = acConfig[ac.id] || {};
           const cap = cfg.defaultCapacity || ac.defaultCapacity;
 
+          const isMorning = t => !t || t < "13:00";
           const allLegs = [
             ...legs.map(l => ({...l, _t:"leg"})),
             ...acCharters.map(c => ({_t:"charter", depTime:c.depTime, arrTime:c.arrTime,
               dep:c.from, arr:c.to, client:c.client, pax:c.pax}))
-          ].sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
+          ]
+          .filter(l => exportSession === "morning" ? isMorning(l.depTime) : !isMorning(l.depTime))
+          .sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
+
+          if (allLegs.length === 0) return null;
 
           return (
             <div key={ac.id} style={{ marginBottom:10, background:C.surface,
@@ -794,9 +885,11 @@ function ExportModal({ onClose, exportSession, setExportSession, generatePrintHT
                   <span style={{ background:C.blueDim, color:C.blue, padding:"1px 6px",
                     borderRadius:3, fontSize:9, fontWeight:700, marginLeft:8 }}>{cap} seats</span>
                 </span>
-                <span style={{ fontSize:10, color:nightstop?C.purple:C.cyan, fontWeight:nightstop?700:400 }}>
-                  {nightstop ? `🌙 Nightstop: ${finalPos}` : `Returns: ${finalPos}`}
-                </span>
+                {nightstop && (
+                  <span style={{ fontSize:10, color:C.purple, fontWeight:700 }}>
+                    🌙 Nightstop: {finalPos}
+                  </span>
+                )}
               </div>
               <div style={{ padding:"4px 12px 8px" }}>
                 {allLegs.map((l, i) => {
@@ -892,19 +985,33 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
 
   const workingBoard = ensureAssignments(board);
 
-  // Consumed pax per route — local pax + through/connecting pax (debits their own route pool)
+  // consumed[routeId] = total pax assigned across ALL legs of that route
+  // consumedByLeg[routeId+":"+legIndex] = pax assigned on that specific physical leg
   const consumed = {};
+  const consumedByLeg = {};
   (workingBoard.assignments||[]).forEach(a => {
     (a.legs||[]).forEach(leg => {
-      if (leg.type==="route" && leg.routeId)
-        consumed[leg.routeId] = (consumed[leg.routeId]||0) + legPaxFromPool(leg);
-      // Through pax debit from their route pool, not the leg's route pool
+      if (leg.type==="route" && leg.routeId) {
+        const pax = legPaxFromPool(leg);
+        const legIdx = leg.routeLegIndex ?? 0;
+        const legKey = leg.routeId + ":" + legIdx;
+        // Only debit pool once per physical leg (not per aircraft carrying same leg)
+        // We track per leg separately; pool "consumed" = max leg across all legs
+        consumedByLeg[legKey] = (consumedByLeg[legKey]||0) + pax;
+      }
       const cnx = Number(leg.connectingPax)||0;
       const cnxRoute = leg.throughPaxRouteId;
       if (cnx > 0 && cnxRoute) {
         consumed[cnxRoute] = (consumed[cnxRoute]||0) + cnx;
       }
     });
+  });
+  // For pool display: consumed[routeId] = max pax assigned on any single leg
+  // (since same pax appear on every leg — we don't want to multiply)
+  // We use the highest single-leg assignment as the "consumed" figure.
+  Object.keys(consumedByLeg).forEach(key => {
+    const routeId = key.split(":")[0];
+    consumed[routeId] = Math.max(consumed[routeId]||0, consumedByLeg[key]);
   });
 
   // Spare seats per route: sum of (ac capacity - pax) for each assigned leg on that route
@@ -969,9 +1076,13 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
   // Total overview
   const totalRoutes = routes.length;
   const fullyCleared = routes.filter(r => {
-    const pool = workingBoard.pool[r.id]||0;
-    const used = consumed[r.id]||0;
-    return pool > 0 && used >= pool;
+    const p = workingBoard.pool[r.id]||0;
+    if (!p) return false;
+    const routeLegs = r.operationalRouting || [];
+    if (routeLegs.length > 1) {
+      return routeLegs.every((_, i) => (consumedByLeg[r.id+":"+i]||0) >= p);
+    }
+    return (consumed[r.id]||0) >= p;
   }).length;
 
   // For "use slot" — open legModal pre-filled from a template slot
@@ -1017,17 +1128,21 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
       const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
       const legs = assignment.legs || [];
       const acCharters = charters.filter(c => c.acId === ac.id && c.date === date && c.status !== "cancelled");
-      if (legs.length === 0 && acCharters.length === 0) return "";
       const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
       const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
       const nightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
       const cfg = acConfig[ac.id] || {};
       const cap = cfg.defaultCapacity || ac.defaultCapacity;
 
+      const isMorningLeg = t => !t || t < "13:00";
       const allLegs = [
         ...legs.map(l => ({ ...l, _type:"leg" })),
         ...acCharters.map(c => ({ _type:"charter", depTime:c.depTime, arrTime:c.arrTime, dep:c.from, arr:c.to, client:c.client, pax:c.pax }))
-      ].sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
+      ]
+      .filter(l => exportSession === "morning" ? isMorningLeg(l.depTime) : !isMorningLeg(l.depTime))
+      .sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
+
+      if (allLegs.length === 0) return "";
 
       const legRows = allLegs.map(l => {
         if (l._type === "charter") {
@@ -1068,7 +1183,7 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
             <span style="background:#dbeafe;color:#2563eb;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700">${cap} seats</span>
           </div>
           <div style="font-size:12px;font-weight:700;color:${nightstop?"#7c3aed":"#0891b2"}">
-            ${nightstop ? "🌙 NIGHTSTOP: " + finalPos : "Returns to: " + finalPos}
+            ${nightstop ? "🌙 NIGHTSTOP: " + finalPos : ""}
           </div>
         </div>
         <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'IBM Plex Mono',monospace">
@@ -1161,27 +1276,67 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
         padding:"16px 20px", marginBottom:20 }}>
         <div style={{ fontSize:9, letterSpacing:"0.2em", textTransform:"uppercase",
           color:C.amber, fontWeight:700, marginBottom:14 }}>Pax Pool — Enter Today's Totals</div>
+        {todaySlots.length === 0 ? (
+          <div style={{ color:C.faint, fontSize:11 }}>No flights scheduled for today — add slots in the Schedule tab to populate the pool.</div>
+        ) : (
         <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
-          {routes.map(r => {
+          {routes.filter(r => todaySlots.some(s => s.routeId === r.id)).map(r => {
             const poolVal = workingBoard.pool[r.id] || "";
-            const usedVal = consumed[r.id] || 0;
-            const rem = Math.max(0, (Number(poolVal)||0) - usedVal);
-            const pct = poolVal ? Math.round(usedVal/(Number(poolVal))*100) : 0;
-            const col = rem===0&&poolVal?C.green : pct>80?C.amber : C.blue;
+            const total = Number(poolVal)||0;
+            const routeLegs = r.operationalRouting || [];
+            const isMultiLeg = routeLegs.length > 1;
+
+            // Per-leg assigned counts
+            const legCounts = routeLegs.map((_, i) => consumedByLeg[r.id+":"+i] || 0);
+            // For single-leg routes, fall back to consumed
+            const usedVal = isMultiLeg
+              ? Math.max(...legCounts, 0)
+              : (consumed[r.id] || 0);
+            const rem = Math.max(0, total - usedVal);
+            const pct = total ? Math.round(usedVal/total*100) : 0;
+
+            // All legs fully covered?
+            const allLegsCovered = isMultiLeg
+              ? routeLegs.every((_, i) => (consumedByLeg[r.id+":"+i]||0) >= total && total > 0)
+              : (usedVal >= total && total > 0);
+            const col = allLegsCovered ? C.green : pct>80 ? C.amber : C.blue;
+
             return (
               <div key={r.id} style={{ background:C.surface, border:`1px solid ${col}44`,
-                borderRadius:6, padding:"10px 14px", minWidth:160 }}>
+                borderRadius:6, padding:"10px 14px", minWidth: isMultiLeg ? 220 : 160 }}>
                 <div style={{ fontSize:9, color:C.dim, letterSpacing:"0.1em",
                   textTransform:"uppercase", marginBottom:6 }}>{r.name}</div>
                 <input type="number" min="0" style={{ ...s.inp, fontSize:20,
                   fontWeight:700, color:col, padding:"4px 8px", marginBottom:6 }}
                   value={poolVal} placeholder="0"
                   onChange={e => setPool(r.id, e.target.value)} />
-                <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:C.faint }}>
-                  <span>{usedVal} assigned</span>
-                  <span style={{ color:col, fontWeight:700 }}>{rem} left</span>
-                </div>
-                <div style={{ height:3, background:C.bg, borderRadius:2, marginTop:4, marginBottom: spareSeats[r.id]>0 ? 6 : 0 }}>
+
+                {/* Multi-leg: show per-leg status */}
+                {isMultiLeg ? (
+                  <div style={{ marginBottom:6 }}>
+                    {routeLegs.map((l, i) => {
+                      const legPax = consumedByLeg[r.id+":"+i] || 0;
+                      const legOk = total > 0 && legPax >= total;
+                      const legCol = legOk ? C.green : legPax > 0 ? C.amber : C.faint;
+                      return (
+                        <div key={i} style={{ display:"flex", justifyContent:"space-between",
+                          alignItems:"center", fontSize:9, marginBottom:3 }}>
+                          <span style={{ color:C.dim }}>{l.from}→{l.to}</span>
+                          <span style={{ color:legCol, fontWeight:700 }}>
+                            {legPax}/{total||"?"} {legOk ? "✓" : ""}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:C.faint, marginBottom:4 }}>
+                    <span>{usedVal} assigned</span>
+                    <span style={{ color:col, fontWeight:700 }}>{rem} left</span>
+                  </div>
+                )}
+
+                <div style={{ height:3, background:C.bg, borderRadius:2, marginTop:2, marginBottom: spareSeats[r.id]>0 ? 6 : 0 }}>
                   <div style={{ width:`${pct}%`, height:"100%", background:col, borderRadius:2 }} />
                 </div>
                 {spareSeats[r.id] > 0 && (
@@ -1197,6 +1352,7 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
             <div style={{ color:C.faint, fontSize:12 }}>Define routes first in the Routes tab.</div>
           )}
         </div>
+        )}
       </div>
 
       {/* MAIN BOARD + TEMPLATE PANEL */}
@@ -1336,6 +1492,7 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
           aircraft={aircraft}
           pool={workingBoard.pool}
           consumed={consumed}
+          consumedByLeg={consumedByLeg}
           acConfig={acConfig}
           allLegs={modalAssignment?.legs||[]}
           onSave={saveLeg}
