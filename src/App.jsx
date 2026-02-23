@@ -94,14 +94,19 @@ async function dbGetAcConfig() {
 
 async function dbSaveAcConfig(acId, cfg) {
   try {
-    const { error } = await supabase.from("ac_config").upsert({
+    console.log("[dbSaveAcConfig] saving for", acId, cfg);
+    const { data, error } = await supabase.from("ac_config").upsert({
       ac_id: acId,
       route_flight_times: cfg.routeFlightTimes || {},
       default_capacity: cfg.defaultCapacity || null,
       updated_at: new Date().toISOString(),
-    });
-    if (error) throw error;
-  } catch (e) { console.error("dbSaveAcConfig", e); }
+    }, { onConflict: "ac_id" });
+    if (error) {
+      console.error("[dbSaveAcConfig] Supabase error:", error);
+      throw error;
+    }
+    console.log("[dbSaveAcConfig] saved OK", data);
+  } catch (e) { console.error("[dbSaveAcConfig] exception:", e); }
 }
 
 // ── boards: one row per date
