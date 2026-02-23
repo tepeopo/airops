@@ -98,7 +98,6 @@ async function dbSaveAcConfig(acId, cfg) {
     const { data, error } = await supabase.from("ac_config").upsert({
       ac_id: acId,
       route_flight_times: cfg.routeFlightTimes || {},
-      default_capacity: cfg.defaultCapacity || null,
       updated_at: new Date().toISOString(),
     }, { onConflict: "ac_id" });
     if (error) {
