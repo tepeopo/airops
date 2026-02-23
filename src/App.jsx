@@ -352,6 +352,11 @@ function AircraftCard({
     (a.legs||[]).forEach(leg => {
       if (leg.type==="route" && leg.routeId)
         consumed[leg.routeId] = (consumed[leg.routeId]||0) + legPaxFromPool(leg);
+      const cnx = Number(leg.connectingPax)||0;
+      const cnxRoute = leg.throughPaxRouteId;
+      if (cnx > 0 && cnxRoute) {
+        consumed[cnxRoute] = (consumed[cnxRoute]||0) + cnx;
+      }
     });
   });
 
@@ -426,10 +431,20 @@ function AircraftCard({
               {leg.type==="route" && (() => {
                 const cfg2 = acConfig[ac.id] || {};
                 const acCap = cfg2.defaultCapacity || ac.defaultCapacity;
-                const spare = acCap - (Number(leg.pax)||0);
+                const connecting = Number(leg.connectingPax)||0;
+                const routePax = Number(leg.pax)||0;
+                const totalOnBoard = routePax + connecting;
+                const spare = acCap - totalOnBoard;
                 return (
-                  <span style={{ display:"flex", alignItems:"center", gap:5 }}>
-                    <span style={{ color:C.amber, fontWeight:700 }}>{leg.pax} pax</span>
+                  <span style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap" }}>
+                    <span style={{ color:C.amber, fontWeight:700 }}>{routePax} pax</span>
+                    {connecting > 0 && (
+                      <span style={{ background:C.purpleDim, color:C.purple,
+                        padding:"1px 6px", borderRadius:3, fontSize:9, fontWeight:700,
+                        border:`1px solid ${C.purple}44` }}>
+                        +{connecting} cnx
+                      </span>
+                    )}
                     {spare > 0 && (
                       <span style={{ background:C.greenDim, color:C.green,
                         padding:"1px 6px", borderRadius:3, fontSize:9, fontWeight:700,
@@ -442,6 +457,13 @@ function AircraftCard({
                         padding:"1px 6px", borderRadius:3, fontSize:9, fontWeight:700,
                         border:`1px solid ${C.amber}44` }}>
                         FULL
+                      </span>
+                    )}
+                    {spare < 0 && (
+                      <span style={{ background:C.redDim, color:C.red,
+                        padding:"1px 6px", borderRadius:3, fontSize:9, fontWeight:700,
+                        border:`1px solid ${C.red}44` }}>
+                        OVER {Math.abs(spare)}
                       </span>
                     )}
                   </span>
@@ -481,7 +503,7 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
 
   const [form, setForm] = useState(leg || {
     type: "route", routeId: "", dep: guessFrom, arr: "",
-    pax: "", depTime: "", arrTime: "",
+    pax: "", connectingPax: "", throughPaxRouteId: "", depTime: "", arrTime: "",
     charterClient: "", charterRef: "",
   });
 
@@ -609,6 +631,52 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
               return null;
             })()}
           </F>
+          <F label="Through Pax (boarding here, riding further)">
+            <div style={{ display:"flex", gap:8, alignItems:"flex-start" }}>
+              <div style={{ flex:1 }}>
+                <input style={{ ...s.inp, borderColor: (() => {
+                  const total = (Number(form.pax)||0) + (Number(form.connectingPax)||0);
+                  return total > cap ? C.red : Number(form.connectingPax)>0 ? C.cyan : C.border;
+                })() }}
+                  type="number" min="0" value={form.connectingPax}
+                  onChange={e => setForm(f=>({...f,connectingPax:e.target.value}))}
+                  placeholder="0 pax" />
+              </div>
+              <div style={{ flex:2 }}>
+                <select style={{ ...s.inp, borderColor: form.throughPaxRouteId ? C.cyan : C.border }}
+                  value={form.throughPaxRouteId}
+                  onChange={e => setForm(f=>({...f,throughPaxRouteId:e.target.value}))}>
+                  <option value="">← select their route</option>
+                  {routes.filter(r => r.id !== form.routeId).map(r => {
+                    const rem = Math.max(0,(pool[r.id]||0)-(consumed[r.id]||0));
+                    return <option key={r.id} value={r.id}>{r.name} ({rem} avail)</option>;
+                  })}
+                </select>
+              </div>
+            </div>
+            {(() => {
+              const cnx = Number(form.connectingPax)||0;
+              const local = Number(form.pax)||0;
+              const total = local + cnx;
+              const spare = cap - total;
+              if (cnx > 0) return (
+                <div style={{ marginTop:5, background: spare<0?C.redDim:C.cyanDim,
+                  border:`1px solid ${spare<0?C.red:C.cyan}44`,
+                  borderRadius:4, padding:"5px 10px", fontSize:10 }}>
+                  <span style={{ color:spare<0?C.red:C.cyan, fontWeight:700 }}>
+                    {local} local + {cnx} through = {total} on board
+                  </span>
+                  {spare >= 0
+                    ? <span style={{ color:C.green, marginLeft:8 }}>· {spare} seat{spare!==1?"s":""} free</span>
+                    : <span style={{ color:C.red, marginLeft:8 }}>· OVERLOADED by {Math.abs(spare)}</span>}
+                  {!form.throughPaxRouteId && cnx > 0 && (
+                    <span style={{ color:C.amber, marginLeft:8 }}>⚠ Select route to track pool correctly</span>
+                  )}
+                </div>
+              );
+              return null;
+            })()}
+          </F>
         </>
       )}
 
@@ -622,6 +690,8 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
           </F>
         </G2>
       )}
+
+
 
       <G2>
         <F label="Departure Time *">
@@ -642,6 +712,139 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
         <button style={s.btn("ghost")} onClick={onClose}>Cancel</button>
         <button style={s.btn(valid?"primary":"ghost")} onClick={() => valid && onSave({...form, id: form.id||uid()})}>
           Save
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ════════════════════════════════════════
+   EXPORT MODAL COMPONENT
+════════════════════════════════════════ */
+function ExportModal({ onClose, exportSession, setExportSession, generatePrintHTML,
+  aircraft, workingBoard, charters, acConfig, routes, date }) {
+
+  const openPrint = () => {
+    const html = generatePrintHTML();
+    const w = window.open("", "_blank");
+    if (!w) { alert("Pop-up blocked. Please allow pop-ups for this site."); return; }
+    w.document.write(html);
+    w.document.close();
+  };
+
+  const activeAc = aircraft.filter(a => a.status === "active");
+
+  return (
+    <Modal title="Export Program" onClose={onClose} wide>
+      {/* Session toggle */}
+      <div style={{ marginBottom:16 }}>
+        <div style={s.label}>Session</div>
+        <div style={{ display:"flex", gap:8 }}>
+          {[["afternoon","☀️ Afternoon Program"],["morning","🌅 Morning Program"]].map(([val,label]) => (
+            <button key={val} onClick={() => setExportSession(val)}
+              style={{ ...s.btn(exportSession===val?"primary":"ghost"), flex:1 }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Preview */}
+      <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:6,
+        padding:16, marginBottom:16, maxHeight:420, overflowY:"auto" }}>
+        <div style={{ fontSize:11, color:C.dim, marginBottom:12 }}>
+          <strong style={{ color:C.text }}>
+            {exportSession === "afternoon" ? "☀️ Afternoon Program" : "🌅 Morning Program"}
+          </strong>
+          {" — "}{new Date(date + "T12:00:00").toLocaleDateString("en-GB",
+            { weekday:"long", day:"numeric", month:"long", year:"numeric" })}
+        </div>
+
+        {activeAc.map(ac => {
+          const asgn = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+          const legs = asgn.legs || [];
+          const acCharters = charters.filter(c =>
+            c.acId === ac.id && c.date === date && c.status !== "cancelled");
+          if (legs.length === 0 && acCharters.length === 0) return null;
+
+          const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
+          const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
+          const nightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
+          const cfg = acConfig[ac.id] || {};
+          const cap = cfg.defaultCapacity || ac.defaultCapacity;
+
+          const allLegs = [
+            ...legs.map(l => ({...l, _t:"leg"})),
+            ...acCharters.map(c => ({_t:"charter", depTime:c.depTime, arrTime:c.arrTime,
+              dep:c.from, arr:c.to, client:c.client, pax:c.pax}))
+          ].sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
+
+          return (
+            <div key={ac.id} style={{ marginBottom:10, background:C.surface,
+              border:`1px solid ${nightstop?C.purple:C.border}`, borderRadius:6, overflow:"hidden" }}>
+              <div style={{ background:nightstop?C.purpleDim:C.panel, padding:"8px 12px",
+                display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <span>
+                  <strong style={{ color:C.amber, fontSize:13 }}>{ac.reg}</strong>
+                  <span style={{ color:C.dim, fontSize:10, marginLeft:8 }}>{ac.type}</span>
+                  <span style={{ background:C.blueDim, color:C.blue, padding:"1px 6px",
+                    borderRadius:3, fontSize:9, fontWeight:700, marginLeft:8 }}>{cap} seats</span>
+                </span>
+                <span style={{ fontSize:10, color:nightstop?C.purple:C.cyan, fontWeight:nightstop?700:400 }}>
+                  {nightstop ? `🌙 Nightstop: ${finalPos}` : `Returns: ${finalPos}`}
+                </span>
+              </div>
+              <div style={{ padding:"4px 12px 8px" }}>
+                {allLegs.map((l, i) => {
+                  const connecting = Number(l.connectingPax)||0;
+                  const totalOnBoard = (Number(l.pax)||0) + connecting;
+                  const spare = cap - totalOnBoard;
+                  const throughRoute = l.throughPaxRouteId ? routes.find(x => x.id === l.throughPaxRouteId) : null;
+                  return (
+                    <div key={i} style={{ display:"flex", gap:10, fontSize:11,
+                      padding:"4px 0", borderBottom:`1px solid ${C.border}22`, alignItems:"center" }}>
+                      <span style={{ color:l._t==="charter"?C.purple:C.blue,
+                        fontWeight:700, minWidth:55, fontSize:9 }}>
+                        {l._t==="charter"?"CHARTER":(l.type||"ROUTE").toUpperCase()}
+                      </span>
+                      <span style={{ fontWeight:700, minWidth:80 }}>{l.dep}→{l.arr}</span>
+                      <span style={{ color:C.green, minWidth:95 }}>{l.depTime}→{l.arrTime}</span>
+                      {l._t==="charter"
+                        ? <span style={{ color:C.purple }}>{l.client} · {l.pax||"?"} pax</span>
+                        : <span style={{ color:C.amber }}>
+                            {l.pax} pax
+                            {connecting > 0 && (
+                              <span style={{ color:C.cyan }}> +{connecting} thru{throughRoute?" ("+throughRoute.name+")":""}</span>
+                            )}
+                            {connecting > 0 && <span style={{ color:C.dim }}> ={totalOnBoard}</span>}
+                            {spare > 0
+                              ? <span style={{ color:C.green, fontSize:9 }}> (+{spare} spare)</span>
+                              : spare === 0
+                                ? <span style={{ color:C.amber, fontSize:9 }}> FULL</span>
+                                : <span style={{ color:C.red, fontSize:9, fontWeight:700 }}> OVERLOAD</span>}
+                          </span>
+                      }
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+
+        {activeAc.every(ac => {
+          const asgn = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+          return (asgn.legs||[]).length === 0 &&
+            charters.filter(c => c.acId === ac.id && c.date === date).length === 0;
+        }) && (
+          <div style={{ color:C.faint, fontSize:12 }}>No assignments logged yet for this session.</div>
+        )}
+      </div>
+
+      <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+        <button style={s.btn("ghost")} onClick={onClose}>Close</button>
+        <button style={s.btn("green")} onClick={openPrint}>
+          🖨 Open Printable Sheet
         </button>
       </div>
     </Modal>
@@ -685,12 +888,18 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
 
   const workingBoard = ensureAssignments(board);
 
-  // Consumed pax per route across ALL assignments
+  // Consumed pax per route — local pax + through/connecting pax (debits their own route pool)
   const consumed = {};
   (workingBoard.assignments||[]).forEach(a => {
     (a.legs||[]).forEach(leg => {
       if (leg.type==="route" && leg.routeId)
         consumed[leg.routeId] = (consumed[leg.routeId]||0) + legPaxFromPool(leg);
+      // Through pax debit from their route pool, not the leg's route pool
+      const cnx = Number(leg.connectingPax)||0;
+      const cnxRoute = leg.throughPaxRouteId;
+      if (cnx > 0 && cnxRoute) {
+        consumed[cnxRoute] = (consumed[cnxRoute]||0) + cnx;
+      }
     });
   });
 
@@ -703,7 +912,8 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
       if (leg.type==="route" && leg.routeId) {
         const cfg = acConfig[ac.id] || {};
         const cap = cfg.defaultCapacity || ac.defaultCapacity || 0;
-        const spare = Math.max(0, cap - (Number(leg.pax)||0));
+        const totalOnBoard = (Number(leg.pax)||0) + (Number(leg.connectingPax)||0);
+        const spare = Math.max(0, cap - totalOnBoard);
         spareSeats[leg.routeId] = (spareSeats[leg.routeId]||0) + spare;
       }
     });
@@ -789,6 +999,132 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
         charterClient: "", charterRef: "",
       }
     });
+  };
+
+  // ── Generate print HTML ──────────────────────────────────────────────────
+  const generatePrintHTML = () => {
+    const sessionLabel = exportSession === "afternoon" ? "Afternoon Program" : "Morning Program";
+    const now = new Date();
+    const dateLabel = new Date(date + "T12:00:00").toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long", year:"numeric" });
+    const generatedAt = now.toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
+    const acList = aircraft.filter(a => a.status === "active");
+
+    const rows = acList.map(ac => {
+      const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+      const legs = assignment.legs || [];
+      const acCharters = charters.filter(c => c.acId === ac.id && c.date === date && c.status !== "cancelled");
+      if (legs.length === 0 && acCharters.length === 0) return "";
+      const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
+      const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
+      const nightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
+      const cfg = acConfig[ac.id] || {};
+      const cap = cfg.defaultCapacity || ac.defaultCapacity;
+
+      const allLegs = [
+        ...legs.map(l => ({ ...l, _type:"leg" })),
+        ...acCharters.map(c => ({ _type:"charter", depTime:c.depTime, arrTime:c.arrTime, dep:c.from, arr:c.to, client:c.client, pax:c.pax }))
+      ].sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
+
+      const legRows = allLegs.map(l => {
+        if (l._type === "charter") {
+          return `<tr style="background:#faf5ff">
+            <td style="padding:7px 12px;font-weight:700;color:#7c3aed;border-bottom:1px solid #e2e8f0">CHARTER</td>
+            <td style="padding:7px 12px;font-weight:700;border-bottom:1px solid #e2e8f0">${l.dep||""}→${l.arr||""}</td>
+            <td style="padding:7px 12px;color:#059669;font-weight:700;border-bottom:1px solid #e2e8f0">${l.depTime||""}→${l.arrTime||""}</td>
+            <td style="padding:7px 12px;color:#7c3aed;border-bottom:1px solid #e2e8f0">${l.client||""}</td>
+            <td style="padding:7px 12px;border-bottom:1px solid #e2e8f0">${l.pax||"?"} pax</td>
+          </tr>`;
+        }
+        const connecting = Number(l.connectingPax)||0;
+        const totalOnBoard = (Number(l.pax)||0) + connecting;
+        const spare = cap - totalOnBoard;
+        const r = routes.find(x => x.id === l.routeId);
+        const throughRoute = l.throughPaxRouteId ? routes.find(x => x.id === l.throughPaxRouteId) : null;
+        const spareHtml = spare > 0
+          ? `<span style="color:#059669;font-size:10px"> (+${spare} spare)</span>`
+          : spare === 0 ? `<span style="color:#d97706;font-size:10px"> FULL</span>`
+          : `<span style="color:#dc2626;font-size:10px"> OVERLOAD</span>`;
+        const cnxLabel = connecting > 0
+          ? `<span style="color:#0891b2;font-size:10px"> +${connecting} thru${throughRoute?" ("+throughRoute.name+")":""}</span>`
+          : "";
+        return `<tr>
+          <td style="padding:7px 12px;font-weight:700;color:#2563eb;border-bottom:1px solid #e2e8f0">${(l.type||"ROUTE").toUpperCase()}</td>
+          <td style="padding:7px 12px;font-weight:700;border-bottom:1px solid #e2e8f0">${l.dep||""}→${l.arr||""}</td>
+          <td style="padding:7px 12px;color:#059669;font-weight:700;border-bottom:1px solid #e2e8f0">${l.depTime||""}→${l.arrTime||""}</td>
+          <td style="padding:7px 12px;color:#475569;font-size:11px;border-bottom:1px solid #e2e8f0">${r ? r.name : ""}</td>
+          <td style="padding:7px 12px;border-bottom:1px solid #e2e8f0">${l.pax||0}${cnxLabel}${connecting>0?` = ${totalOnBoard} on board`:""}${spareHtml}</td>
+        </tr>`;
+      }).join("");
+
+      return `<div style="margin-bottom:20px;border:2px solid ${nightstop?"#7c3aed":"#e2e8f0"};border-radius:8px;overflow:hidden;page-break-inside:avoid">
+        <div style="background:${nightstop?"#ede9fe":"#f8fafc"};padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #e2e8f0">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-weight:700;font-size:17px;color:#d97706">${ac.reg}</span>
+            <span style="color:#475569;font-size:12px">${ac.type||""}</span>
+            <span style="background:#dbeafe;color:#2563eb;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700">${cap} seats</span>
+          </div>
+          <div style="font-size:12px;font-weight:700;color:${nightstop?"#7c3aed":"#0891b2"}">
+            ${nightstop ? "🌙 NIGHTSTOP: " + finalPos : "Returns to: " + finalPos}
+          </div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'IBM Plex Mono',monospace">
+          <thead><tr style="background:#f1f5f9">
+            <th style="text-align:left;padding:6px 12px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;text-transform:uppercase;border-bottom:1px solid #e2e8f0">Type</th>
+            <th style="text-align:left;padding:6px 12px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;text-transform:uppercase;border-bottom:1px solid #e2e8f0">Sector</th>
+            <th style="text-align:left;padding:6px 12px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;text-transform:uppercase;border-bottom:1px solid #e2e8f0">Times</th>
+            <th style="text-align:left;padding:6px 12px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;text-transform:uppercase;border-bottom:1px solid #e2e8f0">Route</th>
+            <th style="text-align:left;padding:6px 12px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;text-transform:uppercase;border-bottom:1px solid #e2e8f0">Pax</th>
+          </tr></thead>
+          <tbody>${legRows}</tbody>
+        </table>
+      </div>`;
+    }).filter(Boolean).join("");
+
+    const nightstops = acList.filter(ac => {
+      const asgn = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+      const ll = asgn.legs.length > 0 ? asgn.legs[asgn.legs.length-1] : null;
+      return ll && ac.base && ll.arr !== ac.base;
+    });
+
+    const nightstopBlock = nightstops.length > 0 ? `
+      <div style="margin-top:24px;border:2px solid #7c3aed;border-radius:8px;padding:16px 20px;background:#faf5ff;page-break-inside:avoid">
+        <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#7c3aed;font-weight:700;margin-bottom:12px">🌙 Nightstop Summary</div>
+        ${nightstops.map(ac => {
+          const asgn = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+          if (!asgn.legs.length) return "";
+          const ll = asgn.legs[asgn.legs.length-1];
+          return `<div style="display:flex;gap:20px;font-size:13px;margin-bottom:6px;align-items:center">
+            <span style="color:#d97706;font-weight:700;min-width:90px">${ac.reg}</span>
+            <span style="color:#7c3aed;font-weight:700">Overnights at ${ll.arr}</span>
+            <span style="color:#94a3b8;font-size:11px">(home base: ${ac.base})</span>
+          </div>`;
+        }).join("")}
+      </div>` : "";
+
+    return `<!DOCTYPE html><html><head>
+      <meta charset="utf-8"/>
+      <title>AirOps — ${sessionLabel} — ${dateLabel}</title>
+      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+      <style>
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { font-family:'IBM Plex Mono','Courier New',monospace; background:#fff; color:#0f172a; padding:36px; max-width:900px; margin:0 auto; }
+        @media print { .no-print { display:none !important; } body { padding:16px; } }
+      </style>
+    </head><body>
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:28px;padding-bottom:16px;border-bottom:3px solid #0f172a">
+        <div>
+          <div style="font-size:13px;letter-spacing:0.2em;text-transform:uppercase;color:#94a3b8;margin-bottom:4px">✈ AirOps Dispatch</div>
+          <div style="font-size:30px;font-weight:700;color:#d97706">${sessionLabel}</div>
+          <div style="font-size:15px;color:#475569;margin-top:4px">${dateLabel}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:11px;color:#94a3b8">Generated at ${generatedAt}</div>
+          <button class="no-print" onclick="window.print()" style="margin-top:10px;padding:8px 18px;background:#d97706;color:#000;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-family:inherit;font-size:12px">🖨 Print / Save PDF</button>
+        </div>
+      </div>
+      ${rows || "<p style='color:#94a3b8'>No assignments logged for this session.</p>"}
+      ${nightstopBlock}
+    </body></html>`;
   };
 
   return (
@@ -973,225 +1309,20 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
       </div>
 
       {/* EXPORT MODAL */}
-      {showExport && (() => {
-        const sessionLabel = exportSession === "afternoon" ? "Afternoon Program" : "Morning Program";
-        const now = new Date();
-        const dateLabel = new Date(date + "T12:00:00").toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long", year:"numeric" });
-        const generatedAt = now.toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
-
-        const acList = aircraft.filter(a => a.status === "active");
-
-        const printHTML = () => {
-          const rows = acList.map(ac => {
-            const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
-            const legs = assignment.legs || [];
-            const acCharters = charters.filter(c => c.acId === ac.id && c.date === date && c.status !== "cancelled");
-            const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
-            const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
-            const nightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
-            const cfg = acConfig[ac.id] || {};
-            const cap = cfg.defaultCapacity || ac.defaultCapacity;
-
-            // Merge legs + charters sorted by depTime
-            const allLegs = [
-              ...legs.map(l => ({ ...l, _type: "leg" })),
-              ...acCharters.map(c => ({ _type:"charter", depTime:c.depTime, arrTime:c.arrTime, dep:c.from, arr:c.to, client:c.client, pax:c.pax }))
-            ].sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
-
-            if (allLegs.length === 0) return "";
-
-            const legRows = allLegs.map(l => {
-              if (l._type === "charter") {
-                return `<tr style="background:#f5f3ff">
-                  <td style="padding:6px 10px;font-weight:700;color:#7c3aed">CHARTER</td>
-                  <td style="padding:6px 10px">${l.dep||""}→${l.arr||""}</td>
-                  <td style="padding:6px 10px;color:#059669;font-weight:700">${l.depTime||""}→${l.arrTime||""}</td>
-                  <td style="padding:6px 10px;color:#7c3aed">${l.client||""}</td>
-                  <td style="padding:6px 10px">${l.pax||"?"} pax</td>
-                  <td></td>
-                </tr>`;
-              }
-              const spare = cap - (Number(l.pax)||0);
-              const r = routes.find(x => x.id === l.routeId);
-              return `<tr>
-                <td style="padding:6px 10px;font-weight:700;color:#2563eb">${(l.type||"ROUTE").toUpperCase()}</td>
-                <td style="padding:6px 10px">${l.dep||""}→${l.arr||""}</td>
-                <td style="padding:6px 10px;color:#059669;font-weight:700">${l.depTime||""}→${l.arrTime||""}</td>
-                <td style="padding:6px 10px;color:#475569;font-size:11px">${r?r.name:""}</td>
-                <td style="padding:6px 10px">${l.pax||0} pax${spare>0?` <span style="color:#059669;font-size:10px">(+${spare} spare)</span>`:spare===0?' <span style="color:#d97706;font-size:10px">FULL</span>':""}</td>
-                <td></td>
-              </tr>`;
-            }).join("");
-
-            return `
-              <div style="margin-bottom:24px;border:1px solid ${nightstop?"#7c3aed":"#e2e8f0"};border-radius:8px;overflow:hidden;page-break-inside:avoid">
-                <div style="background:${nightstop?"#ede9fe":"#f8fafc"};padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #e2e8f0">
-                  <div>
-                    <span style="font-weight:700;font-size:16px;color:#d97706">${ac.reg}</span>
-                    <span style="margin-left:10px;color:#475569;font-size:12px">${ac.type||""}</span>
-                    <span style="margin-left:10px;background:#dbeafe;color:#2563eb;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700">${cap} seats</span>
-                  </div>
-                  <div style="text-align:right;font-size:12px">
-                    ${nightstop
-                      ? `<span style="color:#7c3aed;font-weight:700">🌙 NIGHTSTOP: ${finalPos}</span>`
-                      : `<span style="color:#0891b2">Returns to: <strong>${finalPos}</strong></span>`}
-                  </div>
-                </div>
-                <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
-                  <thead>
-                    <tr style="background:#f1f5f9">
-                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">TYPE</th>
-                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">SECTOR</th>
-                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">TIMES</th>
-                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">ROUTE</th>
-                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">PAX</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>${legRows}</tbody>
-                </table>
-              </div>`;
-          }).filter(Boolean).join("");
-
-        // Nightstop summary
-        const nightstops = acList.filter(ac => {
-          const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
-          const legs = assignment.legs || [];
-          const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
-          return lastLeg && ac.base && lastLeg.arr !== ac.base;
-        });
-
-        const nightstopSummary = nightstops.length > 0 ? `
-          <div style="margin-top:24px;border:1px solid #7c3aed;border-radius:8px;padding:14px 18px;background:#faf5ff">
-            <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#7c3aed;font-weight:700;margin-bottom:10px">🌙 Nightstop Summary</div>
-            ${nightstops.map(ac => {
-              const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
-              const lastLeg = assignment.legs[assignment.legs.length-1];
-              return `<div style="display:flex;gap:16px;font-size:12px;margin-bottom:4px">
-                <span style="color:#d97706;font-weight:700;min-width:80px">${ac.reg}</span>
-                <span style="color:#7c3aed">Overnights at <strong>${lastLeg.arr}</strong></span>
-                <span style="color:#94a3b8">(home base: ${ac.base})</span>
-              </div>`;
-            }).join("")}
-          </div>` : "";
-
-          const html = `<!DOCTYPE html><html><head>
-            <meta charset="utf-8"/>
-            <title>AirOps — ${sessionLabel} — ${dateLabel}</title>
-            <style>
-              * { box-sizing: border-box; margin: 0; padding: 0; }
-              body { font-family: 'IBM Plex Mono', 'Courier New', monospace; background: #fff; color: #0f172a; padding: 32px; }
-              @media print {
-                body { padding: 16px; }
-                button { display: none !important; }
-                .no-print { display: none !important; }
-              }
-            </style>
-            <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet"/>
-          </head><body>
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px;padding-bottom:16px;border-bottom:2px solid #0f172a">
-              <div>
-                <div style="font-size:22px;font-weight:700;letter-spacing:0.05em">✈ AirOps</div>
-                <div style="font-size:28px;font-weight:700;color:#d97706;margin-top:4px">${sessionLabel}</div>
-                <div style="font-size:14px;color:#475569;margin-top:4px">${dateLabel}</div>
-              </div>
-              <div style="text-align:right;font-size:11px;color:#94a3b8">
-                <div>Generated ${generatedAt}</div>
-                <div style="margin-top:4px">${acList.filter(a=>{ const asgn=workingBoard.assignments.find(x=>x.acId===a.id); return (asgn?.legs||[]).length>0; }).length} aircraft active</div>
-                <button class="no-print" onclick="window.print()" style="margin-top:8px;padding:6px 14px;background:#d97706;color:#000;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-family:inherit">🖨 Print</button>
-              </div>
-            </div>
-            ${rows}
-            ${nightstopSummary}
-          </body></html>`;
-          return html;
-        };
-
-        return (
-          <Modal title="Export Program" onClose={() => setShowExport(false)} wide>
-            <div style={{ marginBottom:16 }}>
-              <Label c="Session Type" />
-              <div style={{ display:"flex", gap:8 }}>
-                {[["afternoon","☀️ Afternoon Program"],["morning","🌅 Next Morning Program"]].map(([val,label]) => (
-                  <button key={val} onClick={() => setExportSession(val)}
-                    style={{ ...s.btn(exportSession===val?"primary":"ghost"), flex:1 }}>
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:6, padding:16, marginBottom:16 }}>
-              <div style={{ fontSize:11, color:C.dim, marginBottom:10 }}>
-                <strong style={{ color:C.text }}>
-                  {exportSession === "afternoon" ? "☀️ Afternoon Program" : "🌅 Morning Program"}
-                </strong>
-                {" — "}{new Date(date + "T12:00:00").toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long" })}
-              </div>
-              {aircraft.filter(a => a.status === "active").map(ac => {
-                const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
-                const legs = assignment.legs || [];
-                const acCharters = charters.filter(c => c.acId === ac.id && c.date === date && c.status !== "cancelled");
-                const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
-                const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
-                const nightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
-                const cfg = acConfig[ac.id] || {};
-                const cap = cfg.defaultCapacity || ac.defaultCapacity;
-                if (legs.length === 0 && acCharters.length === 0) return null;
-                return (
-                  <div key={ac.id} style={{ marginBottom:10, background:C.surface,
-                    border:`1px solid ${nightstop?C.purple:C.border}`, borderRadius:6, overflow:"hidden" }}>
-                    <div style={{ background:nightstop?C.purpleDim:C.panel, padding:"7px 12px",
-                      display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                      <span>
-                        <strong style={{ color:C.amber }}>{ac.reg}</strong>
-                        <span style={{ color:C.dim, fontSize:10, marginLeft:8 }}>{ac.type}</span>
-                      </span>
-                      <span style={{ fontSize:10, color:nightstop?C.purple:C.cyan, fontWeight:nightstop?700:400 }}>
-                        {nightstop ? `🌙 Nightstop: ${finalPos}` : `Returns: ${finalPos}`}
-                      </span>
-                    </div>
-                    <div style={{ padding:"6px 12px" }}>
-                      {[...legs.map(l=>({...l,_t:"leg"})), ...acCharters.map(c=>({_t:"charter",depTime:c.depTime,arrTime:c.arrTime,dep:c.from,arr:c.to,client:c.client,pax:c.pax}))]
-                        .sort((a,b)=>(a.depTime||"").localeCompare(b.depTime||""))
-                        .map((l,i) => {
-                          const spare = l._t==="leg" ? cap-(Number(l.pax)||0) : 0;
-                          return (
-                            <div key={i} style={{ display:"flex", gap:10, fontSize:11,
-                              padding:"3px 0", borderBottom:`1px solid ${C.border}22`, alignItems:"center" }}>
-                              <span style={{ color:l._t==="charter"?C.purple:C.blue, fontWeight:700, minWidth:60 }}>
-                                {l._t==="charter"?"CHARTER":(l.type||"ROUTE").toUpperCase()}
-                              </span>
-                              <span style={{ color:C.text, fontWeight:700 }}>{l.dep}→{l.arr}</span>
-                              <span style={{ color:C.green }}>{l.depTime}→{l.arrTime}</span>
-                              {l._t==="charter"
-                                ? <span style={{ color:C.purple }}>{l.client}</span>
-                                : <span style={{ color:C.amber }}>{l.pax} pax{spare>0?<span style={{color:C.green}}> +{spare}</span>:""}</span>
-                              }
-                            </div>
-                          );
-                        })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
-              <button style={s.btn("ghost")} onClick={() => setShowExport(false)}>Close</button>
-              <button style={s.btn("green")} onClick={() => {
-                const html = printHTML();
-                const w = window.open("", "_blank");
-                w.document.write(html);
-                w.document.close();
-              }}>
-                🖨 Open Printable Sheet
-              </button>
-            </div>
-          </Modal>
-        );
-      })()}
-
+      {showExport && (
+        <ExportModal
+          onClose={() => setShowExport(false)}
+          exportSession={exportSession}
+          setExportSession={setExportSession}
+          generatePrintHTML={generatePrintHTML}
+          aircraft={aircraft}
+          workingBoard={workingBoard}
+          charters={charters}
+          acConfig={acConfig}
+          routes={routes}
+          date={date}
+        />
+      )}
       {/* LEG MODAL */}
       {legModal && modalAc && (
         <LegModal
