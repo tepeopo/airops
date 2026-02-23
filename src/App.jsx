@@ -342,7 +342,9 @@ function AircraftCard({
     c.acId === ac.id && c.date === date && c.status !== "cancelled"
   );
 
-  const currentBase = legs.length > 0 ? legs[legs.length-1].arr : (ac.base || "?");
+  const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
+  const currentBase = lastLeg ? lastLeg.arr : (ac.base || "?");
+  const isNightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
 
   // Consumed per route by ALL aircraft
   const consumed = {};
@@ -356,19 +358,25 @@ function AircraftCard({
   const getRemaining = (routeId) => Math.max(0, (pool[routeId]||0) - (consumed[routeId]||0));
 
   return (
-    <div style={{ background:C.card, border:`1px solid ${C.border}`,
-      borderRadius:8, marginBottom:14, overflow:"hidden" }}>
+    <div style={{ background:C.card,
+      border:`1px solid ${isNightstop ? C.purple : C.border}`,
+      borderRadius:8, marginBottom:14, overflow:"hidden",
+      boxShadow: isNightstop ? `0 0 0 1px ${C.purple}44` : "none" }}>
 
       {/* AC Header */}
-      <div style={{ background:C.panel, borderBottom:`1px solid ${C.border}`,
+      <div style={{ background: isNightstop ? C.purpleDim : C.panel,
+        borderBottom:`1px solid ${C.border}`,
         padding:"10px 16px", display:"flex", alignItems:"center", gap:14 }}>
         <span style={{ fontWeight:700, fontSize:15, color:C.amber }}>{ac.reg}</span>
         <span style={{ fontSize:10, color:C.dim }}>{ac.type}</span>
         <span style={s.tag(C.blue)}>{cap} seats</span>
         {ac.base && <span style={{ fontSize:10, color:C.faint }}>Base: {ac.base}</span>}
-        <span style={{ fontSize:10, color:C.cyan, marginLeft:"auto" }}>
-          Now at: <strong>{currentBase}</strong>
+        <span style={{ fontSize:10, color: isNightstop ? C.purple : C.cyan, marginLeft:"auto", fontWeight: isNightstop ? 700 : 400 }}>
+          {isNightstop ? "🌙 NIGHTSTOP:" : "Now at:"} <strong>{currentBase}</strong>
         </span>
+        {isNightstop && (
+          <span style={s.tag(C.purple)}>Away from base</span>
+        )}
         {acCharters.length > 0 && (
           <span style={s.tag(C.purple)}>⚑ {acCharters.length} charter{acCharters.length>1?"s":""}</span>
         )}
@@ -646,6 +654,8 @@ function LegModal({ leg, onSave, onClose, routes, aircraft, pool, consumed, ac, 
 function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards, weekly }) {
   const [date, setDate] = useState(todayStr());
   const [showTemplate, setShowTemplate] = useState(true);
+  const [showExport, setShowExport] = useState(false);
+  const [exportSession, setExportSession] = useState("afternoon"); // "afternoon" | "morning"
 
   // Get today's template slots
   const todayDay = dateToDay(date);
@@ -799,6 +809,9 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
           <button style={s.btn(showTemplate?"primary":"ghost", true)}
             onClick={() => setShowTemplate(v => !v)}>
             {showTemplate ? "Hide Template" : `📋 Template (${todaySlots.length})`}
+          </button>
+          <button style={s.btn("green", true)} onClick={() => setShowExport(true)}>
+            ⬇ Export Program
           </button>
         </div>
       </div>
@@ -958,6 +971,226 @@ function DispatchBoard({ aircraft, routes, charters, acConfig, boards, setBoards
           </div>
         )}
       </div>
+
+      {/* EXPORT MODAL */}
+      {showExport && (() => {
+        const sessionLabel = exportSession === "afternoon" ? "Afternoon Program" : "Morning Program";
+        const now = new Date();
+        const dateLabel = new Date(date + "T12:00:00").toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long", year:"numeric" });
+        const generatedAt = now.toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
+
+        const acList = aircraft.filter(a => a.status === "active");
+
+        const printHTML = () => {
+          const rows = acList.map(ac => {
+            const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+            const legs = assignment.legs || [];
+            const acCharters = charters.filter(c => c.acId === ac.id && c.date === date && c.status !== "cancelled");
+            const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
+            const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
+            const nightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
+            const cfg = acConfig[ac.id] || {};
+            const cap = cfg.defaultCapacity || ac.defaultCapacity;
+
+            // Merge legs + charters sorted by depTime
+            const allLegs = [
+              ...legs.map(l => ({ ...l, _type: "leg" })),
+              ...acCharters.map(c => ({ _type:"charter", depTime:c.depTime, arrTime:c.arrTime, dep:c.from, arr:c.to, client:c.client, pax:c.pax }))
+            ].sort((a,b) => (a.depTime||"").localeCompare(b.depTime||""));
+
+            if (allLegs.length === 0) return "";
+
+            const legRows = allLegs.map(l => {
+              if (l._type === "charter") {
+                return `<tr style="background:#f5f3ff">
+                  <td style="padding:6px 10px;font-weight:700;color:#7c3aed">CHARTER</td>
+                  <td style="padding:6px 10px">${l.dep||""}→${l.arr||""}</td>
+                  <td style="padding:6px 10px;color:#059669;font-weight:700">${l.depTime||""}→${l.arrTime||""}</td>
+                  <td style="padding:6px 10px;color:#7c3aed">${l.client||""}</td>
+                  <td style="padding:6px 10px">${l.pax||"?"} pax</td>
+                  <td></td>
+                </tr>`;
+              }
+              const spare = cap - (Number(l.pax)||0);
+              const r = routes.find(x => x.id === l.routeId);
+              return `<tr>
+                <td style="padding:6px 10px;font-weight:700;color:#2563eb">${(l.type||"ROUTE").toUpperCase()}</td>
+                <td style="padding:6px 10px">${l.dep||""}→${l.arr||""}</td>
+                <td style="padding:6px 10px;color:#059669;font-weight:700">${l.depTime||""}→${l.arrTime||""}</td>
+                <td style="padding:6px 10px;color:#475569;font-size:11px">${r?r.name:""}</td>
+                <td style="padding:6px 10px">${l.pax||0} pax${spare>0?` <span style="color:#059669;font-size:10px">(+${spare} spare)</span>`:spare===0?' <span style="color:#d97706;font-size:10px">FULL</span>':""}</td>
+                <td></td>
+              </tr>`;
+            }).join("");
+
+            return `
+              <div style="margin-bottom:24px;border:1px solid ${nightstop?"#7c3aed":"#e2e8f0"};border-radius:8px;overflow:hidden;page-break-inside:avoid">
+                <div style="background:${nightstop?"#ede9fe":"#f8fafc"};padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #e2e8f0">
+                  <div>
+                    <span style="font-weight:700;font-size:16px;color:#d97706">${ac.reg}</span>
+                    <span style="margin-left:10px;color:#475569;font-size:12px">${ac.type||""}</span>
+                    <span style="margin-left:10px;background:#dbeafe;color:#2563eb;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700">${cap} seats</span>
+                  </div>
+                  <div style="text-align:right;font-size:12px">
+                    ${nightstop
+                      ? `<span style="color:#7c3aed;font-weight:700">🌙 NIGHTSTOP: ${finalPos}</span>`
+                      : `<span style="color:#0891b2">Returns to: <strong>${finalPos}</strong></span>`}
+                  </div>
+                </div>
+                <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
+                  <thead>
+                    <tr style="background:#f1f5f9">
+                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">TYPE</th>
+                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">SECTOR</th>
+                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">TIMES</th>
+                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">ROUTE</th>
+                      <th style="text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.12em;color:#94a3b8;border-bottom:1px solid #e2e8f0">PAX</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>${legRows}</tbody>
+                </table>
+              </div>`;
+          }).filter(Boolean).join("");
+
+        // Nightstop summary
+        const nightstops = acList.filter(ac => {
+          const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+          const legs = assignment.legs || [];
+          const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
+          return lastLeg && ac.base && lastLeg.arr !== ac.base;
+        });
+
+        const nightstopSummary = nightstops.length > 0 ? `
+          <div style="margin-top:24px;border:1px solid #7c3aed;border-radius:8px;padding:14px 18px;background:#faf5ff">
+            <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#7c3aed;font-weight:700;margin-bottom:10px">🌙 Nightstop Summary</div>
+            ${nightstops.map(ac => {
+              const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+              const lastLeg = assignment.legs[assignment.legs.length-1];
+              return `<div style="display:flex;gap:16px;font-size:12px;margin-bottom:4px">
+                <span style="color:#d97706;font-weight:700;min-width:80px">${ac.reg}</span>
+                <span style="color:#7c3aed">Overnights at <strong>${lastLeg.arr}</strong></span>
+                <span style="color:#94a3b8">(home base: ${ac.base})</span>
+              </div>`;
+            }).join("")}
+          </div>` : "";
+
+          const html = `<!DOCTYPE html><html><head>
+            <meta charset="utf-8"/>
+            <title>AirOps — ${sessionLabel} — ${dateLabel}</title>
+            <style>
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body { font-family: 'IBM Plex Mono', 'Courier New', monospace; background: #fff; color: #0f172a; padding: 32px; }
+              @media print {
+                body { padding: 16px; }
+                button { display: none !important; }
+                .no-print { display: none !important; }
+              }
+            </style>
+            <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+          </head><body>
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px;padding-bottom:16px;border-bottom:2px solid #0f172a">
+              <div>
+                <div style="font-size:22px;font-weight:700;letter-spacing:0.05em">✈ AirOps</div>
+                <div style="font-size:28px;font-weight:700;color:#d97706;margin-top:4px">${sessionLabel}</div>
+                <div style="font-size:14px;color:#475569;margin-top:4px">${dateLabel}</div>
+              </div>
+              <div style="text-align:right;font-size:11px;color:#94a3b8">
+                <div>Generated ${generatedAt}</div>
+                <div style="margin-top:4px">${acList.filter(a=>{ const asgn=workingBoard.assignments.find(x=>x.acId===a.id); return (asgn?.legs||[]).length>0; }).length} aircraft active</div>
+                <button class="no-print" onclick="window.print()" style="margin-top:8px;padding:6px 14px;background:#d97706;color:#000;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-family:inherit">🖨 Print</button>
+              </div>
+            </div>
+            ${rows}
+            ${nightstopSummary}
+          </body></html>`;
+          return html;
+        };
+
+        return (
+          <Modal title="Export Program" onClose={() => setShowExport(false)} wide>
+            <div style={{ marginBottom:16 }}>
+              <Label c="Session Type" />
+              <div style={{ display:"flex", gap:8 }}>
+                {[["afternoon","☀️ Afternoon Program"],["morning","🌅 Next Morning Program"]].map(([val,label]) => (
+                  <button key={val} onClick={() => setExportSession(val)}
+                    style={{ ...s.btn(exportSession===val?"primary":"ghost"), flex:1 }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:6, padding:16, marginBottom:16 }}>
+              <div style={{ fontSize:11, color:C.dim, marginBottom:10 }}>
+                <strong style={{ color:C.text }}>
+                  {exportSession === "afternoon" ? "☀️ Afternoon Program" : "🌅 Morning Program"}
+                </strong>
+                {" — "}{new Date(date + "T12:00:00").toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long" })}
+              </div>
+              {aircraft.filter(a => a.status === "active").map(ac => {
+                const assignment = workingBoard.assignments.find(a => a.acId === ac.id) || { legs:[] };
+                const legs = assignment.legs || [];
+                const acCharters = charters.filter(c => c.acId === ac.id && c.date === date && c.status !== "cancelled");
+                const lastLeg = legs.length > 0 ? legs[legs.length-1] : null;
+                const finalPos = lastLeg ? lastLeg.arr : (ac.base || "?");
+                const nightstop = lastLeg && ac.base && lastLeg.arr !== ac.base;
+                const cfg = acConfig[ac.id] || {};
+                const cap = cfg.defaultCapacity || ac.defaultCapacity;
+                if (legs.length === 0 && acCharters.length === 0) return null;
+                return (
+                  <div key={ac.id} style={{ marginBottom:10, background:C.surface,
+                    border:`1px solid ${nightstop?C.purple:C.border}`, borderRadius:6, overflow:"hidden" }}>
+                    <div style={{ background:nightstop?C.purpleDim:C.panel, padding:"7px 12px",
+                      display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                      <span>
+                        <strong style={{ color:C.amber }}>{ac.reg}</strong>
+                        <span style={{ color:C.dim, fontSize:10, marginLeft:8 }}>{ac.type}</span>
+                      </span>
+                      <span style={{ fontSize:10, color:nightstop?C.purple:C.cyan, fontWeight:nightstop?700:400 }}>
+                        {nightstop ? `🌙 Nightstop: ${finalPos}` : `Returns: ${finalPos}`}
+                      </span>
+                    </div>
+                    <div style={{ padding:"6px 12px" }}>
+                      {[...legs.map(l=>({...l,_t:"leg"})), ...acCharters.map(c=>({_t:"charter",depTime:c.depTime,arrTime:c.arrTime,dep:c.from,arr:c.to,client:c.client,pax:c.pax}))]
+                        .sort((a,b)=>(a.depTime||"").localeCompare(b.depTime||""))
+                        .map((l,i) => {
+                          const spare = l._t==="leg" ? cap-(Number(l.pax)||0) : 0;
+                          return (
+                            <div key={i} style={{ display:"flex", gap:10, fontSize:11,
+                              padding:"3px 0", borderBottom:`1px solid ${C.border}22`, alignItems:"center" }}>
+                              <span style={{ color:l._t==="charter"?C.purple:C.blue, fontWeight:700, minWidth:60 }}>
+                                {l._t==="charter"?"CHARTER":(l.type||"ROUTE").toUpperCase()}
+                              </span>
+                              <span style={{ color:C.text, fontWeight:700 }}>{l.dep}→{l.arr}</span>
+                              <span style={{ color:C.green }}>{l.depTime}→{l.arrTime}</span>
+                              {l._t==="charter"
+                                ? <span style={{ color:C.purple }}>{l.client}</span>
+                                : <span style={{ color:C.amber }}>{l.pax} pax{spare>0?<span style={{color:C.green}}> +{spare}</span>:""}</span>
+                              }
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+              <button style={s.btn("ghost")} onClick={() => setShowExport(false)}>Close</button>
+              <button style={s.btn("green")} onClick={() => {
+                const html = printHTML();
+                const w = window.open("", "_blank");
+                w.document.write(html);
+                w.document.close();
+              }}>
+                🖨 Open Printable Sheet
+              </button>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {/* LEG MODAL */}
       {legModal && modalAc && (
